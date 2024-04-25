@@ -46,9 +46,9 @@ def device_sync(device):
 
 torch._inductor.config.coordinate_descent_tuning = True
 torch._inductor.config.triton.unique_kernel_names = True
-torch._inductor.config.fx_graph_cache = (
-    True  # Experimental feature to reduce compilation times, will be on by default in future
-)
+# torch._inductor.config.fx_graph_cache = (
+#     True  # Experimental feature to reduce compilation times, will be on by default in future
+# )
 
 # imports need to happen after setting above flags
 from fam.llm.fast_model import Transformer
@@ -149,19 +149,47 @@ def decode_n_tokens(
     spk_emb: torch.Tensor,
     input_pos: torch.Tensor,
     num_new_tokens: int,
+    audio_input,
     callback=lambda _: _,
     return_probs: bool = False,
     end_of_audio_token: int = 2048,
     **sampling_kwargs,
 ):
     new_tokens, new_probs = [], []
+
+    #Assemble the first stage LLM tokens.
+    audio_input_1 = audio_input[0]
+    audio_input_2 = [audio_input[1][j] + int(end_of_audio_token / 2) for j in range(len(audio_input[1]))]
+
+    audio_tokens = audio_input_1[:1] 
+
+    ind1 = 1
+    ind2 = 0
+
+    #Assemble the firt state LLM tokens from the audio tokens interleaving from each band.
+    for k in range(len(audio_input_1)*2-2):
+
+        if k % 2 == 0: 
+            audio_tokens.append(audio_input_1[ind1])
+            ind1 += 1
+        else:
+            audio_tokens.append(audio_input_2[ind2])
+            ind2 += 1
+
+
     for i in tqdm.tqdm(range(num_new_tokens)):
         if (cur_token == end_of_audio_token).any():
             break
         with torch.backends.cuda.sdp_kernel(
             enable_flash=False, enable_mem_efficient=False, enable_math=True
         ):  # Actually better for Inductor to codegen attention here
+        
             next_token, next_prob = decode_one_token(model, cur_token, spk_emb, input_pos, **sampling_kwargs)
+            
+            #Force generation of the first audio tokens, then let model perform speech continuation
+            if i < len(audio_tokens):
+                next_token = torch.tensor([audio_tokens[i]], dtype=torch.int32, device=next_token.device)
+
             input_pos += 1
             new_tokens.append(next_token.clone())
             callback(new_tokens[-1])
@@ -185,31 +213,31 @@ def generate(
     max_new_tokens: Optional[int] = None,
     callback=lambda x: x,
     end_of_audio_token: int = 2048,
+    audio_input : list,
     **sampling_kwargs,
 ) -> torch.Tensor:
     """
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
     """
     # create an empty tensor of the expected final shape and fill in the current tokens
-    T = prompt.size(0)
+    C = prompt.size(0)
     if max_new_tokens is None:
         max_seq_length = model.config.block_size
     else:
-        max_seq_length = T + max_new_tokens
+        max_seq_length = C + max_new_tokens
         max_seq_length = min(max_seq_length, model.config.block_size)
-    max_new_tokens = max_seq_length - T
+    max_new_tokens = max_seq_length - C
     if max_new_tokens <= 0:
         raise ValueError("Prompt is too long to generate more tokens")
 
     device, dtype = prompt.device, prompt.dtype
 
     seq = torch.clone(prompt)
-    input_pos = torch.arange(0, T, device=device)
+    input_pos = torch.arange(0, C, device=device)
+    next_token = prefill(model, prompt.view(1,-1).repeat(2,1), spk_emb, input_pos, **sampling_kwargs)
 
-    next_token = prefill(model, prompt.view(1, -1).repeat(2, 1), spk_emb, input_pos, **sampling_kwargs)
     seq = torch.cat([seq, next_token.view(1)])
-
-    input_pos = torch.tensor([T], device=device, dtype=torch.int)
+    input_pos = torch.tensor([C], device=device, dtype=torch.int) #add position from audio input
 
     generated_tokens, _ = decode_n_tokens(
         model,
@@ -219,6 +247,7 @@ def generate(
         max_new_tokens - 1,
         callback=callback,
         end_of_audio_token=end_of_audio_token,
+        audio_input=audio_input,
         **sampling_kwargs,
     )
     seq = torch.cat([seq, torch.cat(generated_tokens)])
@@ -253,7 +282,9 @@ def _load_model(checkpoint_path, spk_emb_ckpt_path, device, precision, first_mod
     #     simple_quantizer = WeightOnlyInt4QuantHandler(model, groupsize)
     #     model = simple_quantizer.convert_for_runtime()
     
-    checkpoint = torch.load(str(checkpoint_path), mmap=True, weights_only=False)
+    checkpoint = torch.load(str(checkpoint_path), mmap=True, weights_only=False)\
+    
+    if ("metavoiceio--metavoice-1B-v0.1") in str(checkpoint_path): unwanted_prefix="_orig_mod." #this model has a different prefix!!!!!!!!!!!
 
     ###### TOKENIZER
     tokenizer_info = checkpoint.get("meta", {}).get("tokenizer", {})
@@ -397,6 +428,7 @@ def build_model(
         top_p=torch.tensor(0.95, device=device, dtype=precision),
         guidance_scale=torch.tensor(3.0, device=device, dtype=precision),
         end_of_audio_token=9999,  # don't end early for compilation stage.
+        audio_input=[[1,12,5,312],[2,1,42,234]]
     )
 
     device_sync(device=device)  # MKG
@@ -418,6 +450,7 @@ def main(
     top_k: Optional[torch.Tensor] = None,
     top_p: Optional[torch.Tensor] = None,
     device: str = "cuda",
+    audio_input : list,
 ) -> list:
     """Generates text samples based on a pre-trained Transformer model and tokenizer."""
 
@@ -443,6 +476,7 @@ def main(
         top_k=top_k,
         top_p=top_p,
         guidance_scale=guidance_scale,
+        audio_input=audio_input,
     )
 
     device_sync(device=device)  # MKG
