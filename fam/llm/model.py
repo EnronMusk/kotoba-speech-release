@@ -435,6 +435,7 @@ class GPT(nn.Module, NonCausalInferenceMixin, CausalInferenceMixin):
         speaker_embs: Optional[torch.Tensor] = None,
         batch_size: Optional[int] = None,
         guidance_scale: Optional[float] = None,
+        audio_input: list = None,
     ):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,num_hierarchies,t)) and complete
@@ -481,6 +482,7 @@ class GPT(nn.Module, NonCausalInferenceMixin, CausalInferenceMixin):
                         speaker_embs=speaker_embs[start_index:end_index] if speaker_embs is not None else None,
                         temperature=temperature,
                         top_k=top_k,
+                        audio_input=audio_input
                     )
                 )
             return torch.cat(out, dim=0)

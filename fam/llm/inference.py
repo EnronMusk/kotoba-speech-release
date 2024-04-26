@@ -250,6 +250,7 @@ class Model:
         top_k: Optional[int],
         temperature: Optional[float],
         speaker_embs: Optional[torch.Tensor] = None,
+        audio_input: list = None,
     ) -> list[str]:
         """
         Returns paths to saved audio files.
@@ -309,6 +310,9 @@ class Model:
         with torch.no_grad():
             with self._ctx:  # type: ignore
                 to_return = []
+
+                print("in_x ", in_x.shape)
+
                 for k in range(self.config.num_samples):
                     y = self.model.generate(
                         in_x,
@@ -320,6 +324,7 @@ class Model:
                         speaker_embs=speaker_embs,
                         batch_size=batch_size,
                         guidance_scale=None,
+                        audio_input=audio_input
                     )
 
                     b_tokens = torch.cat([in_x, y], dim=1)
@@ -345,8 +350,10 @@ class Model:
         encodec_tokens: Optional[list[torch.Tensor]] = None,
         speaker_embs: Optional[torch.Tensor] = None,
         guidance_scale: Optional[float] = None,
+        audio_input: list,
     ):
         if self.checkpoint_config.get("causal", True):
+            assert False
             return self.causal_sample(
                 texts=texts,
                 batch_size=batch_size,
@@ -363,6 +370,8 @@ class Model:
             assert max_new_tokens is None
             assert top_p is None
 
+            print("is_causal")
+
             return self.non_causal_sample(
                 texts=texts,
                 encodec_tokens=encodec_tokens,
@@ -370,6 +379,7 @@ class Model:
                 speaker_embs=speaker_embs,
                 top_k=top_k,
                 temperature=temperature,
+                audio_input=audio_input,
             )
 
 

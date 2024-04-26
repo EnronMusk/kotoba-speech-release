@@ -181,7 +181,7 @@ class TTS:
             top_p=torch.tensor(top_p, device=self._device, dtype=self.precision),
             guidance_scale=torch.tensor(0, device=self._device, dtype=self.precision),
             temperature=torch.tensor(temperature, device=self._device, dtype=self.precision),
-            audio_input=audio_toks, #audio input for speech continuation.
+            audio_input=audio_toks[:2], #audio input for speech continuation.
         )
 
         text_ids, extracted_audio_ids = self.first_stage_adapter.decode([tokens])
@@ -199,6 +199,7 @@ class TTS:
             top_k=200,
             temperature=1.0,
             max_new_tokens=None,
+            audio_input=audio_toks[2:]
         )
 
         # enhance using deepfilternet

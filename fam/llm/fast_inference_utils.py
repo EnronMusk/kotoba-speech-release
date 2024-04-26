@@ -157,26 +157,6 @@ def decode_n_tokens(
 ):
     new_tokens, new_probs = [], []
 
-    #Assemble the first stage LLM tokens.
-    audio_input_1 = audio_input[0]
-    audio_input_2 = [audio_input[1][j] + int(end_of_audio_token / 2) for j in range(len(audio_input[1]))]
-
-    audio_tokens = audio_input_1[:1] 
-
-    ind1 = 1
-    ind2 = 0
-
-    #Assemble the firt state LLM tokens from the audio tokens interleaving from each band.
-    for k in range(len(audio_input_1)*2-2):
-
-        if k % 2 == 0: 
-            audio_tokens.append(audio_input_1[ind1])
-            ind1 += 1
-        else:
-            audio_tokens.append(audio_input_2[ind2])
-            ind2 += 1
-
-
     for i in tqdm.tqdm(range(num_new_tokens)):
         if (cur_token == end_of_audio_token).any():
             break
@@ -185,10 +165,6 @@ def decode_n_tokens(
         ):  # Actually better for Inductor to codegen attention here
         
             next_token, next_prob = decode_one_token(model, cur_token, spk_emb, input_pos, **sampling_kwargs)
-            
-            #Force generation of the first audio tokens, then let model perform speech continuation
-            if i < len(audio_tokens):
-                next_token = torch.tensor([audio_tokens[i]], dtype=torch.int32, device=next_token.device)
 
             input_pos += 1
             new_tokens.append(next_token.clone())
@@ -220,7 +196,33 @@ def generate(
     Takes a conditioning sequence (prompt) as input and continues to generate as many tokens as requested.
     """
     # create an empty tensor of the expected final shape and fill in the current tokens
-    C = prompt.size(0)
+
+    #Assemble the first stage LLM tokens.
+    audio_input_1 = audio_input[0]
+    audio_input_2 = [audio_input[1][j] + 1024 for j in range(len(audio_input[1]))]
+
+    audio_tokens = audio_input_1[:1] 
+
+    ind1 = 1
+    ind2 = 0
+
+    #Assemble the firt state LLM tokens from the audio tokens interleaving from each band.
+    for k in range(len(audio_input_1)*2-2):
+
+        if k % 2 == 0: 
+            audio_tokens.append(audio_input_1[ind1])
+            ind1 += 1
+        else:
+            audio_tokens.append(audio_input_2[ind2])
+            ind2 += 1
+
+    device, dtype = prompt.device, prompt.dtype
+
+    audio_tokens = torch.tensor(audio_tokens, device=device, dtype=torch.int32)
+    #Add the audio tokens to the prompt
+    combined_input = torch.cat([prompt.view(1,-1), audio_tokens.view(1,-1)], dim=1)
+
+    C = combined_input.size(1)
     if max_new_tokens is None:
         max_seq_length = model.config.block_size
     else:
@@ -230,11 +232,11 @@ def generate(
     if max_new_tokens <= 0:
         raise ValueError("Prompt is too long to generate more tokens")
 
-    device, dtype = prompt.device, prompt.dtype
 
-    seq = torch.clone(prompt)
+    seq = torch.clone(combined_input.view(-1))
     input_pos = torch.arange(0, C, device=device)
-    next_token = prefill(model, prompt.view(1,-1).repeat(2,1), spk_emb, input_pos, **sampling_kwargs)
+
+    next_token = prefill(model, combined_input.repeat(2,1), spk_emb, input_pos, **sampling_kwargs)
 
     seq = torch.cat([seq, next_token.view(1)])
     input_pos = torch.tensor([C], device=device, dtype=torch.int) #add position from audio input
@@ -366,7 +368,7 @@ def build_model(
     checkpoint_path: Path = Path(""),
     spk_emb_ckpt_path: Path = Path(""),
     compile_prefill: bool = False,
-    compile: bool = True,
+    compile: bool = False,
     device: str = "cuda",
     first_model_path: str = None,
 ):
@@ -395,7 +397,8 @@ def build_model(
     with torch.device(device):
         model.setup_spk_cond_mask()
         model.setup_caches(max_batch_size=2, max_seq_length=model.config.block_size)
-
+    
+    compile = False
     if compile:
         print("Compiling...Can take up to 2 mins.")
         global decode_one_token, prefill

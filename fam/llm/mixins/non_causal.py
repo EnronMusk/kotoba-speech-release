@@ -13,7 +13,7 @@ class NonCausalInferenceMixin:
 
     @torch.no_grad()
     def _non_causal_sample(
-        self, *, idx: torch.Tensor, speaker_embs: Optional[torch.Tensor], temperature: float, top_k: int
+        self, *, idx: torch.Tensor, speaker_embs: Optional[torch.Tensor], temperature: float, top_k: int, audio_input: list
     ):
         """
         Perform non-causal sampling.
@@ -50,12 +50,24 @@ class NonCausalInferenceMixin:
         probs = [F.softmax(logits, dim=-1) for logits in list_logits]  # c x (b, t, top_k)
         assert probs[0].shape[0] == b and probs[0].shape[1] == t
 
+        print("probs", len(probs))
+        print("probs", probs[0].shape)
+        print()
         # TODO: output shape is as expected
         outs = []
-        for b_prob in probs:  # c x (b, t, top_k) -> (b, t, top_k)
+        for i,b_prob in enumerate(probs):  # c x (b, t, top_k) -> (b, t, top_k)
             out = [
                 torch.multinomial(prob, num_samples=1).transpose(0, 1).unsqueeze(0) for prob in b_prob
             ]  # b x (t, top_k) -> b x (t, 1) -> b x (1, t) -> b x (1, 1, t)
+
+
+            #Overwrite the initial audio tokens
+            audio_input_i = torch.tensor([audio_input[i]], dtype=torch.int32, device=out[0].device)
+            n = audio_input_i.shape[-1]
+
+            out[0][:,:,:n] = audio_input_i
+
+
             assert len(out) == b and out[0].shape[0] == 1 and out[0].shape[1] == 1 and out[0].shape[2] == t
             out = torch.cat(out, dim=0)  # (b, 1, t)
             assert out.shape[0] == b and out.shape[1] == 1 and out.shape[2] == t
